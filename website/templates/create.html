@@ -1,0 +1,27 @@
+
+{% extends 'base.html' %}
+
+{% block content %}
+<h1>{% block title %} Create a New Post {% endblock %}</h1>
+
+<form method="post">
+	<div class="form-group">
+		<label for="title">물품</label>
+		<input type="text" name="title" placeholder="물품 입력" class="form-control" value="{{ request.form['title'] }}"></input>
+	</div>
+
+	<div class="form-group">
+		<label for="content">내용</label>
+		<textarea name="content" placeholder="내용 입력" class="form-control">{{ request.form['content'] }}</textarea>
+	</div>
+	
+	<div class="form-group">
+		<label for="numberr">개수</label>
+		<textarea name="numberr" placeholder="개수 입력" class="form-control">{{ request.form['numberr'] }}</textarea>
+	</div>
+	
+	<div class="form-group">
+	<button type="submit" class="btn btn-primary">제출</button>
+	</div>
+</form>
+{% endblock %}

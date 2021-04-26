@@ -1,0 +1,554 @@
+#!/usr/bin/env python
+
+# Copyright (c) 2011, Willow Garage, Inc.
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#    * Neither the name of the Willow Garage, Inc. nor the names of its
+#      contributors may be used to endorse or promote products derived from
+#       this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
+import rospy
+from geometry_msgs.msg import Twist
+import sys, select, os
+if os.name == 'nt':
+  import msvcrt
+else:
+  import tty, termios
+
+
+import socket
+import threading
+import time
+import numpy as np
+
+BURGER_MAX_LIN_VEL = 2.00
+BURGER_MAX_ANG_VEL = 2.84
+
+WAFFLE_MAX_LIN_VEL = 0.26
+WAFFLE_MAX_ANG_VEL = 1.82
+
+LIN_VEL_STEP_SIZE = 0.01
+ANG_VEL_STEP_SIZE = 0.1
+
+global moveChk
+global dataChk
+
+global g_dt_no ,g_dt_class ,g_dt_score ,g_dt_left ,g_dt_top ,g_dt_right ,g_dt_bottom
+global g_dp_width , g_dp_height
+global selectClass
+
+# msg = """
+# Control Your TurtleBot3!
+# ---------------------------
+# Moving around:
+#         w
+#    a    s    d
+#         x
+#
+# w/x : increase/decrease linear velocity (Burger : ~ 0.22, Waffle and Waffle Pi : ~ 0.26)
+# a/d : increase/decrease angular velocity (Burger : ~ 2.84, Waffle and Waffle Pi : ~ 1.82)
+#
+# space key, s : force stop
+#
+# CTRL-C to quit
+# """
+
+e = """
+Communications Failed
+"""
+
+msg = """
+Control Your TurtleBot3!
+---------------------------
+# a = move , s = stop ,  t = turn , d = 90_turn 
+
+"""
+
+
+def getKey():
+    if os.name == 'nt':
+      if sys.version_info[0] >= 3:
+        return msvcrt.getch().decode()
+      else:
+        return msvcrt.getch()
+
+    tty.setraw(sys.stdin.fileno())
+    rlist, _, _ = select.select([sys.stdin], [], [], 0.1)
+    if rlist:
+        key = sys.stdin.read(1)
+    else:
+        key = ''
+
+    termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+    return key
+
+def vels(target_linear_vel, target_angular_vel):
+    return "currently:\tlinear vel %s\t angular vel %s " % (target_linear_vel,target_angular_vel)
+
+def makeSimpleProfile(output, input, slop):
+    # if input > output:
+    #     output = min( input, output + slop )
+    # elif input < output:
+    #     output = max( input, output - slop )
+    # else:
+    output = input
+
+    return output
+
+def constrain(input, low, high):
+    if input < low:
+      input = low
+    elif input > high:
+      input = high
+    else:
+      input = input
+
+    return input
+
+def checkLinearLimitVelocity(vel):
+    if turtlebot3_model == "burger":
+      vel = constrain(vel, -BURGER_MAX_LIN_VEL, BURGER_MAX_LIN_VEL)
+    elif turtlebot3_model == "waffle" or turtlebot3_model == "waffle_pi":
+      vel = constrain(vel, -WAFFLE_MAX_LIN_VEL, WAFFLE_MAX_LIN_VEL)
+    else:
+      vel = constrain(vel, -BURGER_MAX_LIN_VEL, BURGER_MAX_LIN_VEL)
+
+    return vel
+
+def checkAngularLimitVelocity(vel):
+    if turtlebot3_model == "burger":
+      vel = constrain(vel, -BURGER_MAX_ANG_VEL, BURGER_MAX_ANG_VEL)
+    elif turtlebot3_model == "waffle" or turtlebot3_model == "waffle_pi":
+      vel = constrain(vel, -WAFFLE_MAX_ANG_VEL, WAFFLE_MAX_ANG_VEL)
+    else:
+      vel = constrain(vel, -BURGER_MAX_ANG_VEL, BURGER_MAX_ANG_VEL)
+
+    return vel
+
+#######################################################
+# get ip adress
+
+def selectpd():
+    global selectClass
+
+
+    HOST = 'xxx.xxx.xxx.xxx'
+    #
+    PORT = 0000
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen(10)
+    client_socket, addr = server_socket.accept()
+    data = client_socket.recv(1024)
+    data = data.decode()
+
+    if data.split(':')[0] == "[flask]":
+        selectClass = data.split(':')[1]
+        print("change product : "+str(selectClass))
+
+    client_socket.close()
+    server_socket.close()
+
+def tcpProtoclPy():
+    global dataChk
+    dataChk = False    
+
+    
+    HOST = 'xxx.xxx.xxx.xxx'
+
+    PORT = 0000
+
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server_socket.bind((HOST, PORT))
+    server_socket.listen(10)
+    print("wait")
+    print("host : " + str(HOST))
+    client_socket, addr = server_socket.accept()
+
+    print('Connected by', addr)
+    display = True
+    selectCk = 0
+    while True:
+        
+        data = client_socket.recv(1024)
+        data = data.decode()
+        dataChk = True
+
+        if display :
+            data = data
+            
+        else:
+            data = data
+            
+
+        if display :
+            global g_dp_width, g_dp_height
+            dp_width , dp_height = data.split(",")
+            print("displayWidth"+dp_width ," , ", "displayHeight:"+dp_height)
+            g_dp_width = dp_width
+            g_dp_height = dp_height
+        else :
+            global selectClass
+
+            pertData = data.split("\n")
+            for i in range(len(pertData)):
+                if pertData[i] != '':
+                    if len(pertData[i].split(" ")) == 7:                
+                        dt_no, dt_class, dt_score, dt_top, dt_left, dt_bottom, dt_right = pertData[i].split(" ")
+                        dt_no = dt_no.replace("[", "").replace("]", "")
+                        dt_score = dt_score.replace("(", "").replace(")", "").replace("%", "")
+                        dt_top = dt_top.replace("RectF(", "").replace(",", "")
+                        dt_left = dt_left.replace(",", "")
+                        dt_bottom = dt_bottom.replace(",", "")
+                        dt_right = dt_right.replace(")", "")
+
+                        global g_dt_no, g_dt_class, g_dt_score, g_dt_left, g_dt_top, g_dt_right, g_dt_bottom
+                        
+
+                        if selectClass == dt_class :
+
+                            g_dt_no = dt_no
+                            g_dt_class = dt_class
+                            g_dt_score = dt_score
+                            g_dt_left = dt_left
+                            g_dt_top = dt_top
+                            g_dt_right = dt_right
+                            g_dt_bottom = dt_bottom
+
+                            selectCk = 0
+                        else:
+                            selectCk = selectCk + 1
+
+                            if(selectCk == 100):
+                                g_dt_no = '-1'
+
+
+        display =False
+
+
+
+    client_socket.close()
+    server_socket.close()
+
+#######################################################################
+
+
+
+#######################################################################
+
+
+
+if __name__=="__main__":
+    print(msg)
+    global moveChk, dataChk
+    moveChk, dataChk = False, False
+
+    global g_dt_no, g_dt_class, g_dt_score, g_dt_left, g_dt_top, g_dt_right, g_dt_bottom
+    g_dt_no, g_dt_class, g_dt_score, g_dt_left, g_dt_top, g_dt_right, g_dt_bottom = None, None, None, None, 0, None, 0
+
+    global selectClass
+    selectClass = None
+
+    # tcp Thread
+    tcp_Thread = threading.Thread(target=tcpProtoclPy, args=())
+    tcp_Thread.daemon = True
+    tcp_Thread.start()
+
+    tcp_Thread_1 = threading.Thread(target=selectpd, args=())
+    tcp_Thread_1.start()
+
+    if os.name != 'nt':
+        settings = termios.tcgetattr(sys.stdin)
+
+    rospy.init_node('turtlebot3_teleop')
+    pub = rospy.Publisher('cmd_vel', Twist, queue_size=10)
+
+    turtlebot3_model = rospy.get_param("model", "burger")
+
+    status = 0
+    target_linear_vel   = 0.0
+    target_angular_vel  = 0.0
+    control_linear_vel  = 0.0
+    control_angular_vel = 0.0
+
+    try:
+        while(1):
+            key = getKey()
+            
+
+            if key == 'a' :
+                print("move mode")
+
+
+                moveChk = True
+                print(dataChk) 
+
+                linear_count = 0
+                angular_count = 0 
+                height_standard = round(float(g_dp_height) - 400)
+
+                while dataChk :
+
+                    key = getKey()
+                    print("round(float(g_dt_top))")
+                    print(round(float(g_dt_top)))
+                    print("height_standard")
+                    print(height_standard)
+                    if height_standard  <  round(float(g_dt_top)) :
+                        print("finish")
+                        print("size stop")
+                        moveChk = False
+                        twist = Twist()
+                        twist.angular.x = 0.0;
+                        twist.angular.y = 0.0;
+                        twist.angular.z = 0.0
+                        pub.publish(twist)
+                        time.sleep(1)
+                        # turn 180 :
+
+                        if angular_count != 0 :
+                            if angular_count > 0:
+                                for i in range(angular_count):
+                                    target_angular_vel = checkAngularLimitVelocity(-0.10)
+                            if angular_count < 0:
+                                for i in range(-angular_count):
+                                    target_angular_vel = checkAngularLimitVelocity(0.10)
+                            twist = Twist()
+                            control_linear_vel = makeSimpleProfile(control_linear_vel, target_linear_vel,(LIN_VEL_STEP_SIZE / 2.0))
+                            twist.linear.x = control_linear_vel;twist.linear.y = 0.0;twist.linear.z = 0.0
+                            control_angular_vel = makeSimpleProfile(control_angular_vel, target_angular_vel,(ANG_VEL_STEP_SIZE / 2.0))
+                            twist.angular.x = 0.0;twist.angular.y = 0.0;twist.angular.z = control_angular_vel
+                            pub.publish(twist)
+
+                        print("180_turn!!!")
+                        for i in range(8):
+                            twist = Twist()
+                            twist.angular.x = 0.01;
+                            twist.angular.y = 0.0;
+                            twist.angular.z = 0.80
+                            pub.publish(twist)
+                            time.sleep(0.5)
+                        target_linear_vel = 0.0
+                        control_linear_vel = 0.0
+                        target_angular_vel = 0.0
+                        control_angular_vel = 0.0
+                        print("linear_count : " , linear_count)
+                        print("angular_count : ", angular_count)
+                        target_linear_vel = checkLinearLimitVelocity(0.2)
+                        for i in range(linear_count) :
+                            twist = Twist()
+                            control_linear_vel = makeSimpleProfile(control_linear_vel, target_linear_vel,(LIN_VEL_STEP_SIZE / 2.0))
+                            twist.linear.x = control_linear_vel;twist.linear.y = 0.0;twist.linear.z = 0.0
+                            control_angular_vel = makeSimpleProfile(control_angular_vel, target_angular_vel,(ANG_VEL_STEP_SIZE / 2.0))
+                            twist.angular.x = 0.0;twist.angular.y = 0.0;twist.angular.z = control_angular_vel
+                            pub.publish(twist)
+                        time.sleep(1)
+                        twist = Twist()
+                        twist.angular.x = 0.0;
+                        twist.angular.y = 0.0;
+                        twist.angular.z = 0.0
+                        pub.publish(twist)
+                        break
+                    if key == 's' :
+                        print("stop")
+                        moveChk = False
+
+                        twist = Twist()
+                        twist.angular.x = 0.0;
+                        twist.angular.y = 0.0;
+                        twist.angular.z = 0.0
+                        pub.publish(twist)
+
+
+                    if g_dt_class == selectClass:
+
+
+
+
+                        if moveChk and dataChk:
+                            # shifting
+
+                            print("moveing!!!")
+                            target_linear_vel = checkLinearLimitVelocity(0.1)
+                            linear_count =  linear_count + 1
+                            print("lnear_count")
+                            print(linear_count)
+                            # spin
+                            global g_dp_width, g_dp_height, s_center
+                            g_dp_width = round(float(g_dp_width))
+                            g_dp_height = round(float(g_dp_height))
+                            g_dt_right = round(float(g_dt_right))
+                            g_dt_left = round(float(g_dt_left))
+                            #dt_center = int(round((g_dt_right - g_dt_left) / 2))
+                            #dt_center = round((g_dt_right - g_dt_left) + np.median([g_dt_right - g_dt_left, g_dt_right]))
+                            display_center = round(g_dp_width / 2)
+                            s_center = round(float((g_dt_left + g_dt_right))/2)
+                            
+
+                            print("g_dt_bottom......")
+                            print(g_dt_bottom)
+                            print("height_standard")  
+                            print(height_standard)
+
+
+
+                            if s_center > 175 and s_center < 235:
+                                print("center")
+                                print(s_center)
+                            elif s_center < 175 :
+                                print("rightturn!!!")
+                                print(s_center)
+                                target_angular_vel = checkAngularLimitVelocity(-0.10)
+                                angular_count = angular_count +1
+                            else:
+                                print("letftturn!!!")
+                                # left
+                                print(s_center)
+                                target_angular_vel = checkAngularLimitVelocity(0.10)
+                                angular_count = angular_count -1
+
+                            print(vels(target_linear_vel, target_angular_vel))
+
+                            twist = Twist()
+                            control_linear_vel = makeSimpleProfile(control_linear_vel, target_linear_vel,(LIN_VEL_STEP_SIZE / 2.0))
+                            twist.linear.x = control_linear_vel;twist.linear.y = 0.0;twist.linear.z = 0.0
+                            control_angular_vel = makeSimpleProfile(control_angular_vel, target_angular_vel,(ANG_VEL_STEP_SIZE / 2.0))
+                            twist.angular.x = 0.0;twist.angular.y = 0.0;twist.angular.z = control_angular_vel
+                            pub.publish(twist)
+
+
+                            target_linear_vel = 0.0
+                            control_linear_vel = 0.0
+                            target_angular_vel = 0.0
+                            control_angular_vel = 0.0
+                            g_dt_no, g_dt_class, g_dt_score, g_dt_left, g_dt_top, g_dt_right, g_dt_bottom = None, None, None, None, None, None, 0 ;
+
+
+
+                    elif g_dt_no == "-1" or linear_count > 35:
+                        print("stop linear count")
+                        print(linear_count)
+                        print("g_dt_top")
+                        print(g_dt_top)
+                        print("g_dp_height)) - 230")  
+                        print(round(float(g_dp_height)) - 230)
+                        
+                        if g_dt_no == "-1":
+                            print("g_dt_np == -1")
+
+                        print("finish")
+
+                        moveChk = False
+
+                        twist = Twist()
+
+                        twist.angular.x = 0.0;
+                        twist.angular.y = 0.0;
+                        twist.angular.z = 0.0
+
+                        pub.publish(twist)
+
+                        time.sleep(0.5)
+
+                        # turn 180 :
+
+
+                        if angular_count > 0:
+                            target_angular_vel = checkAngularLimitVelocity(-0.10)
+
+                                 
+                        if angular_count < 0:
+                            target_angular_vel = checkAngularLimitVelocity(0.10)
+                        print("angular_count")
+                        print(angular_count)
+                        target_linear_vel = 0.1
+                        for i in range(abs(angular_count)):
+                            twist = Twist()
+                            control_linear_vel = makeSimpleProfile(control_linear_vel, target_linear_vel,(LIN_VEL_STEP_SIZE / 2.0))
+                            twist.linear.x = control_linear_vel;twist.linear.y = 0.0;twist.linear.z = 0.0
+                            control_angular_vel = makeSimpleProfile(control_angular_vel, target_angular_vel,(ANG_VEL_STEP_SIZE / 2.0))
+                            twist.angular.x = 0.0;twist.angular.y = 0.0;twist.angular.z = control_angular_vel
+                            pub.publish(twist)
+                            time.sleep(0.5)
+
+
+                        print("180_turn!!!")
+                        for i in range(8):
+                            twist = Twist()
+                            twist.angular.x = 0.01;
+                            twist.angular.y = 0.0;
+                            twist.angular.z = 0.80
+                            pub.publish(twist)
+                            time.sleep(0.5)
+                        target_linear_vel = 0.0
+                        control_linear_vel = 0.0
+                        target_angular_vel = 0.0
+                        control_angular_vel = 0.0
+                        print("linear_count : " , linear_count)
+                        print("angular_count : ", angular_count)
+                        target_linear_vel = checkLinearLimitVelocity(0.2)
+
+                        for i in range(linear_count) :
+                            twist = Twist()
+                            control_linear_vel = makeSimpleProfile(control_linear_vel, target_linear_vel,(LIN_VEL_STEP_SIZE / 2.0))
+                            twist.linear.x = control_linear_vel;twist.linear.y = 0.0;twist.linear.z = 0.0
+                            control_angular_vel = makeSimpleProfile(control_angular_vel, target_angular_vel,(ANG_VEL_STEP_SIZE / 2.0))
+                            twist.angular.x = 0.0;twist.angular.y = 0.0;twist.angular.z = control_angular_vel
+                            pub.publish(twist)
+                            
+
+
+                        time.sleep(1)
+                        twist = Twist()
+                        twist.angular.x = 0.0;
+                        twist.angular.y = 0.0;
+                        twist.angular.z = 0.0
+                        pub.publish(twist)
+
+                        break
+
+
+
+            if (key == '\x03'):
+                break
+
+
+
+    except Exception as x:
+        print(x)
+
+    finally:
+        twist = Twist()
+        twist.linear.x = 0.0; twist.linear.y = 0.0; twist.linear.z = 0.0
+        twist.angular.x = 0.0; twist.angular.y = 0.0; twist.angular.z = 0.0
+        pub.publish(twist)
+
+
+
+    if os.name != 'nt':
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, settings)
+
+
